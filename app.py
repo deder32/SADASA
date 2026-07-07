@@ -8,7 +8,6 @@ import os
 import uuid
 import json
 import base64
-import hashlib 
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, render_template, request, jsonify, url_for, send_file, Response
@@ -20,10 +19,7 @@ from compression_engine import (
     is_image_file,
     is_text_file,
     get_file_size_str,
-    get_file_extension,
-    should_compress,  
-    calculate_entropy, 
-    is_pre_compressed  
+    get_file_extension
 )
 
 # ============================================================
@@ -53,8 +49,7 @@ ALLOWED_EXTENSIONS = {
     '.txt', '.pdf', '.doc', '.docx', '.xls', '.xlsx',
     '.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp', '.gif',
     '.zip', '.gz', '.mp3', '.mp4', '.avi', '.mkv',
-    '.json', '.xml', '.csv', '.html', '.css', '.js', '.py', '.md',
-    '.log', '.csv', '.tsv', '.rtf'
+    '.json', '.xml', '.csv', '.html', '.css', '.js', '.py', '.md'
 }
 
 
@@ -130,68 +125,12 @@ def upload_file():
         file_data = file.read()
         original_filename = secure_filename(file.filename)
         file_extension = get_file_extension(original_filename)
-        file_id = str(uuid.uuid4())[:8]
-
-        # ==========================================================
-        # CEK APAKAH FILE SUDAH TERKOMPRESI SEBELUM KOMPRESI
-        # ==========================================================
-        compress_check = should_compress(file_data, original_filename)
-        
-        if not compress_check['compress']:
-            # File sudah terkompresi - simpan sebagai original
-            compressed_filename = f"{file_id}_{original_filename}"
-            compressed_path = COMPRESSED_FOLDER / f"{compressed_filename}.original"
-            
-            # Simpan file asli
-            with open(compressed_path, 'wb') as f:
-                f.write(file_data)
-            
-            # Simpan ke history
-            history_entry = {
-                'id': file_id,
-                'filename': original_filename,
-                'extension': file_extension,
-                'original_size': len(file_data),
-                'original_size_str': get_file_size_str(len(file_data)),
-                'compressed_size': len(file_data),
-                'compressed_size_str': get_file_size_str(len(file_data)),
-                'algorithm': 'ORIGINAL',
-                'compression_ratio': 100.0,
-                'space_saving': 0.0,
-                'is_lossless': True,
-                'timestamp': datetime.now().isoformat(),
-                'lzw_size': len(file_data),
-                'lzw_lossless': True,
-                'huffman_size': len(file_data),
-                'huffman_lossless': True,
-                'compressed_path': str(compressed_path),
-                'original_hash': hashlib.sha256(file_data).hexdigest(),
-                'sasada_score': 0,
-                'skipped': True,
-                'skip_reason': compress_check['message']
-            }
-            save_history(history_entry)
-            
-            return jsonify({
-                'success': True,
-                'file_id': file_id,
-                'filename': original_filename,
-                'original_size': get_file_size_str(len(file_data)),
-                'compressed_size': get_file_size_str(len(file_data)),
-                'algorithm': 'ORIGINAL',
-                'compression_ratio': 100.0,
-                'space_saving': 0.0,
-                'is_lossless': True,
-                'skipped': True,
-                'skip_reason': compress_check['message'],
-                'entropy': round(calculate_entropy(file_data[:min(len(file_data), 1024*1024)]), 2),
-                'download_url': url_for('download_file', file_id=file_id)
-            })
 
         # ==========================================================
         # KOMPRESI ADAPTIF DENGAN SASADA
         # ==========================================================
         result = compressor.compress(file_data, original_filename)
+        file_id = str(uuid.uuid4())[:8]
 
         # ==========================================================
         # SIMPAN FILE TERKOMPRESI
@@ -224,9 +163,7 @@ def upload_file():
             'huffman_lossless': result['huffman_result']['lossless'],
             'compressed_path': str(compressed_path),
             'original_hash': result['original_hash'],
-            'sasada_score': result.get('sasada_score', 0),
-            'skipped': False,
-            'skip_reason': ''
+            'sasada_score': result.get('sasada_score', 0)
         }
         save_history(history_entry)
 
@@ -262,9 +199,7 @@ def upload_file():
             'is_image': is_image_file(original_filename),
             'download_url': url_for('download_file', file_id=file_id),
             'preview_url': url_for('preview_file', file_id=file_id),
-            'sasada_score': result.get('sasada_score', 0),
-            'skipped': False,
-            'skip_reason': ''
+            'sasada_score': result.get('sasada_score', 0)
         })
 
     except Exception as e:
@@ -275,7 +210,9 @@ def upload_file():
 
 @app.route('/download/<file_id>')
 def download_file(file_id):
-    """Download file terkompresi SASADA (.lzw atau .huff)."""
+    """
+    Download file terkompresi SASADA (.lzw atau .huff).
+    """
     history = load_history()
     entry = next((h for h in history if h['id'] == file_id), None)
 
@@ -286,12 +223,7 @@ def download_file(file_id):
     if not compressed_path.exists():
         return jsonify({'error': 'File not found'}), 404
 
-    # Tentukan ekstensi download
-    if entry.get('skipped', False) or entry['algorithm'] == 'ORIGINAL':
-        download_name = entry['filename']
-    else:
-        download_name = f"{entry['filename']}.{entry['algorithm'].lower()}"
-    
+    download_name = f"{entry['filename']}.{entry['algorithm'].lower()}"
     return send_file(
         compressed_path,
         as_attachment=True,
@@ -301,7 +233,12 @@ def download_file(file_id):
 
 @app.route('/preview/<file_id>')
 def preview_file(file_id):
-    """Preview file SASADA - dekompresi dan tampilkan hasil."""
+    """
+    Preview file SASADA - dekompresi dan tampilkan hasil.
+    Untuk gambar: tampilkan sebagai image.
+    Untuk teks: tampilkan sebagai teks.
+    Untuk lainnya: download.
+    """
     history = load_history()
     entry = next((h for h in history if h['id'] == file_id), None)
 
@@ -316,16 +253,14 @@ def preview_file(file_id):
         with open(compressed_path, 'rb') as f:
             compressed_data = f.read()
 
-        # Jika file adalah original (skipped), langsung tampilkan
-        if entry.get('skipped', False) or entry['algorithm'] == 'ORIGINAL':
-            decompressed = compressed_data
-        else:
-            decompressed = compressor.decompress(compressed_data, entry['algorithm'])
+        # Decompress
+        decompressed = compressor.decompress(compressed_data, entry['algorithm'])
 
         # ==========================================================
         # KASUS: FILE GAMBAR
         # ==========================================================
         if is_image_file(entry['filename']):
+            # Tentukan MIME type
             ext = entry['extension']
             mime_map = {
                 '.jpg': 'image/jpeg',
@@ -396,56 +331,11 @@ def api_history():
     return jsonify(history)
 
 
-@app.route('/api/analyze', methods=['POST'])
-def analyze_file():
-    """API untuk menganalisis file tanpa kompresi."""
-    if 'file' not in request.files:
-        return jsonify({'error': 'No file uploaded'}), 400
-
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'error': 'No file selected'}), 400
-
-    try:
-        file_data = file.read()
-        filename = secure_filename(file.filename)
-        
-        # Analisis file
-        is_compressed, reason, confidence = is_pre_compressed(file_data, filename)
-        entropy = calculate_entropy(file_data[:min(len(file_data), 1024*1024)])
-        compress_check = should_compress(file_data, filename)
-        
-        return jsonify({
-            'filename': filename,
-            'size': len(file_data),
-            'size_str': get_file_size_str(len(file_data)),
-            'entropy': round(entropy, 4),
-            'is_compressed': is_compressed,
-            'compression_reason': reason,
-            'confidence': round(confidence, 4),
-            'should_compress': compress_check['compress'],
-            'recommendation': compress_check['recommended'],
-            'message': compress_check['message']
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/clear_history', methods=['POST'])
 def clear_history():
     """Clear history SASADA."""
     if HISTORY_FILE.exists():
         HISTORY_FILE.unlink()
-    # Reset stats di compressor
-    compressor.stats = {
-        'total_files': 0,
-        'total_original_size': 0,
-        'total_compressed_size': 0,
-        'lzw_count': 0,
-        'huffman_count': 0,
-        'original_count': 0,
-        'skipped_count': 0,
-    }
     return jsonify({'success': True})
 
 
@@ -463,8 +353,6 @@ if __name__ == '__main__':
     
     Features:
     - Adaptive compression (LZW + Huffman)
-    - Smart file type detection (skip already compressed files)
-    - Entropy analysis for compression effectiveness
     - Lossless with SHA-256 verification
     - File preview support
     - Compression history

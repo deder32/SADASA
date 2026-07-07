@@ -1,7 +1,7 @@
 """
 compression_engine.py
 Adaptive Compression Engine - LZW + Huffman
-Dengan deteksi file terkompresi dan entropy analysis
+Diadaptasi dari notebook lzw_smart_storage_colab_ADAPTIVE_LZW_HUFFMAN
 """
 
 import os
@@ -11,7 +11,6 @@ import hashlib
 import heapq
 import numpy as np
 from pathlib import Path
-from collections import Counter
 
 # ============================================================
 # KONFIGURASI LZW
@@ -28,217 +27,6 @@ HEADER_FIXED_SIZE = struct.calcsize(HEADER_FMT)
 HUFFMAN_MAGIC = b"HUF1"
 HUFFMAN_HEADER_FMT = ">4sQQ32s"  # magic, original_size, payload_bit_length, original_sha256_bytes
 HUFFMAN_HEADER_FIXED_SIZE = struct.calcsize(HUFFMAN_HEADER_FMT)
-
-
-# ============================================================
-# FILE TYPE DETECTION & ENTROPY ANALYSIS
-# ============================================================
-def get_file_extension(filename: str) -> str:
-    """Dapatkan ekstensi file."""
-    return Path(filename).suffix.lower()
-
-
-def is_image_file(filename: str) -> bool:
-    """Cek apakah file adalah gambar."""
-    ext = get_file_extension(filename)
-    return ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp', '.gif']
-
-
-def is_text_file(filename: str) -> bool:
-    """Cek apakah file adalah teks."""
-    ext = get_file_extension(filename)
-    return ext in ['.txt', '.json', '.xml', '.csv', '.html', '.css', '.js', '.py', '.md', '.log']
-
-
-def get_file_size_str(size_bytes: int) -> str:
-    """Format ukuran file menjadi string yang mudah dibaca."""
-    if size_bytes == 0:
-        return "0 B"
-    for unit in ['B', 'KB', 'MB', 'GB']:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.2f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.2f} TB"
-
-
-def calculate_entropy(data: bytes) -> float:
-    """
-    Hitung entropy Shannon dari data.
-    Entropy tinggi (7.5+) mengindikasikan data sudah terkompresi atau terenkripsi.
-    """
-    if not data:
-        return 0.0
-    
-    # Gunakan Counter untuk frekuensi
-    freq = Counter(data)
-    length = len(data)
-    entropy = 0.0
-    
-    for count in freq.values():
-        if count > 0:
-            p = count / length
-            # Gunakan math.log2 untuk akurasi
-            import math
-            entropy -= p * math.log2(p)
-    
-    return entropy
-
-
-def is_pre_compressed(data: bytes, filename: str = None) -> tuple:
-    """
-    Deteksi apakah file sudah terkompresi.
-    Returns: (is_compressed, reason, confidence)
-    """
-    if not data or len(data) < 100:
-        return (False, "File terlalu kecil untuk deteksi", 0.0)
-    
-    # ==========================================================
-    # 1. CEK EKSTENSI FILE
-    # ==========================================================
-    if filename:
-        ext = get_file_extension(filename)
-        
-        # Format yang sudah terkompresi (lossy atau lossless)
-        compressed_exts = {
-            '.pdf': 'PDF (sudah terkompresi)',
-            '.zip': 'ZIP archive',
-            '.gz': 'GZIP archive',
-            '.rar': 'RAR archive',
-            '.7z': '7-Zip archive',
-            '.bz2': 'BZIP2 archive',
-            '.xz': 'XZ archive',
-            '.tar': 'TAR archive (bisa dikompresi)',
-            '.jar': 'Java archive',
-            '.war': 'Web archive',
-            '.ear': 'Enterprise archive',
-            '.jpg': 'JPEG image (lossy)',
-            '.jpeg': 'JPEG image (lossy)',
-            '.png': 'PNG image (lossless)',
-            '.gif': 'GIF image',
-            '.webp': 'WebP image',
-            '.bmp': 'BMP image (bisa dikompresi)',
-            '.tiff': 'TIFF image',
-            '.tif': 'TIFF image',
-            '.mp3': 'MP3 audio',
-            '.mp4': 'MP4 video',
-            '.avi': 'AVI video',
-            '.mkv': 'MKV video',
-            '.mov': 'MOV video',
-            '.wmv': 'WMV video',
-            '.flv': 'FLV video',
-            '.docx': 'Word document (ZIP)',
-            '.xlsx': 'Excel spreadsheet (ZIP)',
-            '.pptx': 'PowerPoint presentation (ZIP)',
-            '.odt': 'OpenDocument text (ZIP)',
-            '.ods': 'OpenDocument spreadsheet (ZIP)',
-            '.odp': 'OpenDocument presentation (ZIP)',
-        }
-        
-        if ext in compressed_exts:
-            return (True, compressed_exts[ext], 0.95)
-    
-    # ==========================================================
-    # 2. CEK MAGIC BYTES
-    # ==========================================================
-    magic_map = {
-        b'PK\x03\x04': ('ZIP archive / Office file', 0.99),
-        b'PK\x05\x06': ('ZIP archive (empty)', 0.99),
-        b'PK\x07\x08': ('ZIP archive (spanned)', 0.99),
-        b'%PDF': ('PDF document', 0.98),
-        b'\x89PNG\x0d\x0a\x1a\x0a': ('PNG image', 0.99),
-        b'\xff\xd8\xff': ('JPEG image', 0.99),
-        b'GIF8': ('GIF image', 0.99),
-        b'BM': ('BMP image', 0.90),
-        b'RIFF': ('RIFF container (AVI/WAV)', 0.85),
-        b'ID3': ('MP3 audio', 0.95),
-        b'\x1f\x8b': ('GZIP archive', 0.99),
-        b'BZh': ('BZIP2 archive', 0.99),
-        b'\xfd7zXZ': ('XZ archive', 0.99),
-        b'Rar!': ('RAR archive', 0.99),
-        b'7z\xbc\xaf\x27\x1c': ('7-Zip archive', 0.99),
-        b'\x00\x00\x01\xba': ('MPEG video', 0.85),
-        b'\x00\x00\x01\xb3': ('MPEG video', 0.85),
-        b'ftyp': ('MP4/MOV video', 0.85),
-        b'\x00\x00\x00\x18ftyp': ('MP4 video', 0.85),
-        b'\x00\x00\x00\x1cftyp': ('MP4 video', 0.85),
-        b'\x00\x00\x00\x20ftyp': ('MP4 video', 0.85),
-    }
-    
-    for magic, (name, confidence) in magic_map.items():
-        if data.startswith(magic):
-            return (True, name, confidence)
-    
-    # ==========================================================
-    # 3. CEK ENTROPY (untuk data yang sudah dikompresi)
-    # ==========================================================
-    # Ambil sampel untuk efisiensi (maks 1MB)
-    sample = data[:min(len(data), 1024 * 1024)]
-    entropy = calculate_entropy(sample)
-    
-    # Entropy threshold:
-    # - < 5.0: Data terstruktur (teks, code) → baik untuk kompresi
-    # - 5.0 - 7.0: Data semi-terstruktur → mungkin kompresi
-    # - > 7.5: Data acak (terkompresi/terenkripsi) → tidak efektif
-    if entropy > 7.5:
-        return (True, f"Entropy tinggi ({entropy:.2f}) - data sudah terkompresi/terenkripsi", 0.90)
-    elif entropy > 7.0:
-        return (True, f"Entropy sedang-tinggi ({entropy:.2f}) - kemungkinan terkompresi", 0.70)
-    
-    # ==========================================================
-    # 4. CEK REPETISI UNTUK FILE TEKS
-    # ==========================================================
-    # Jika file teks, cek karakter yang sering muncul
-    if filename and is_text_file(filename):
-        # Cek rasio karakter unik
-        unique_chars = len(set(data[:min(len(data), 10000)]))
-        if len(data) > 100 and unique_chars / len(data[:min(len(data), 10000)]) > 0.8:
-            return (False, "Teks dengan variasi tinggi - masih bisa dikompresi", 0.50)
-    
-    return (False, "Data dapat dikompresi", 0.95)
-
-
-def should_compress(data: bytes, filename: str = None) -> dict:
-    """
-    Evaluasi apakah kompresi bermanfaat.
-    Returns: dict dengan rekomendasi
-    """
-    if not data or len(data) < 100:
-        return {
-            'compress': False,
-            'reason': 'File terlalu kecil (minimal 100 bytes)',
-            'recommended': 'store_original',
-            'confidence': 1.0,
-            'message': 'File terlalu kecil untuk kompresi yang berarti'
-        }
-    
-    is_compressed, reason, confidence = is_pre_compressed(data, filename)
-    
-    if is_compressed:
-        return {
-            'compress': False,
-            'reason': reason,
-            'recommended': 'store_original',
-            'confidence': confidence,
-            'message': f'File sudah terkompresi ({reason}). Kompresi tidak akan efektif.'
-        }
-    
-    # Cek ukuran minimum untuk kompresi efektif
-    if len(data) < 500:
-        return {
-            'compress': True,
-            'reason': 'Ukuran kecil tapi tetap bisa dikompresi',
-            'recommended': 'adaptive',
-            'confidence': 0.70,
-            'message': 'File kecil - kompresi mungkin memberikan sedikit penghematan'
-        }
-    
-    return {
-        'compress': True,
-        'reason': 'Data dapat dikompresi secara efektif',
-        'recommended': 'adaptive',
-        'confidence': confidence,
-        'message': 'File siap dikompresi'
-    }
 
 
 # ============================================================
@@ -281,6 +69,7 @@ def lzw_compress_bytes_fast(data: bytes) -> list:
 def lzw_decompress_codes_fast(codes: list) -> bytes:
     """
     Dekompresi LZW yang konsisten dengan lzw_compress_bytes_fast.
+    Dictionary memetakan code -> bytes (untuk code >= 256).
     """
     if not codes:
         return b""
@@ -319,7 +108,10 @@ def lzw_decompress_codes_fast(codes: list) -> bytes:
 
 
 def pack_codes_12bit(codes: list) -> bytes:
-    """Memadatkan list kode 12-bit menjadi byte stream memakai numpy."""
+    """
+    Memadatkan list kode 12-bit menjadi byte stream memakai numpy (vectorized).
+    Skema: setiap 2 kode 12-bit -> 3 byte.
+    """
     n = len(codes)
     if n == 0:
         return b""
@@ -343,7 +135,7 @@ def pack_codes_12bit(codes: list) -> bytes:
 
 
 def unpack_codes_12bit(packed: bytes, n_codes: int) -> list:
-    """Membongkar byte stream hasil pack_codes_12bit."""
+    """Membongkar byte stream hasil pack_codes_12bit kembali menjadi list kode integer."""
     if n_codes == 0:
         return []
 
@@ -362,7 +154,9 @@ def unpack_codes_12bit(packed: bytes, n_codes: int) -> list:
 
 
 def compress_lzw(data: bytes) -> dict:
-    """Mengompresi data dengan LZW."""
+    """
+    Mengompresi data dengan LZW dan mengembalikan dictionary hasil.
+    """
     if not data:
         return {
             'data': b'',
@@ -392,7 +186,9 @@ def compress_lzw(data: bytes) -> dict:
 
 
 def decompress_lzw(compressed_data: bytes) -> bytes:
-    """Mendekompresi data LZW."""
+    """
+    Mendekompresi data LZW dan mengembalikan bytes asli.
+    """
     if not compressed_data:
         return b""
 
@@ -401,6 +197,7 @@ def decompress_lzw(compressed_data: bytes) -> bytes:
         HEADER_FMT, compressed_data[:HEADER_FIXED_SIZE]
     )
 
+    # ✅ PERBAIKAN: Error message tanpa input_path
     if magic != LZW_MAGIC:
         raise ValueError("Data tidak valid: magic bytes LZW tidak cocok")
 
@@ -418,7 +215,7 @@ def decompress_lzw(compressed_data: bytes) -> bytes:
 # HUFFMAN IMPLEMENTATION
 # ============================================================
 def build_huffman_codebook(data: bytes):
-    """Membangun codebook Huffman."""
+    """Membangun codebook Huffman: byte -> (code_int, code_length)."""
     if not data:
         return {}, [0] * 256
 
@@ -459,7 +256,7 @@ def build_huffman_codebook(data: bytes):
 
 
 def pack_huffman_bits(data: bytes, codebook: dict):
-    """Encode data memakai codebook Huffman."""
+    """Encode data memakai codebook Huffman menjadi byte payload + jumlah bit valid."""
     out = bytearray()
     buffer = 0
     nbits = 0
@@ -506,7 +303,7 @@ def build_huffman_tree_from_freq(freq):
 
 
 def unpack_huffman_bits(payload: bytes, payload_bit_length: int, freq, original_size: int) -> bytes:
-    """Decode payload Huffman."""
+    """Decode payload Huffman menjadi bytes asli."""
     if original_size == 0:
         return b""
 
@@ -538,7 +335,9 @@ def unpack_huffman_bits(payload: bytes, payload_bit_length: int, freq, original_
 
 
 def compress_huffman(data: bytes) -> dict:
-    """Mengompresi data dengan Huffman."""
+    """
+    Mengompresi data dengan Huffman dan mengembalikan dictionary hasil.
+    """
     if not data:
         return {
             'data': b'',
@@ -568,7 +367,9 @@ def compress_huffman(data: bytes) -> dict:
 
 
 def decompress_huffman(compressed_data: bytes) -> bytes:
-    """Mendekompresi data Huffman."""
+    """
+    Mendekompresi data Huffman dan mengembalikan bytes asli.
+    """
     if not compressed_data:
         return b""
 
@@ -577,6 +378,7 @@ def decompress_huffman(compressed_data: bytes) -> bytes:
         HUFFMAN_HEADER_FMT, compressed_data[:HUFFMAN_HEADER_FIXED_SIZE]
     )
 
+    # ✅ PERBAIKAN: Error message tanpa input_path
     if magic != HUFFMAN_MAGIC:
         raise ValueError("Data tidak valid: magic bytes Huffman tidak cocok")
 
@@ -608,12 +410,26 @@ class AdaptiveCompressor:
             'lzw_count': 0,
             'huffman_count': 0,
             'original_count': 0,
-            'skipped_count': 0,  # File yang dilewati (sudah terkompresi)
         }
 
     def compress(self, data: bytes, filename: str = None) -> dict:
         """
         Kompresi adaptif - pilih algoritma terbaik.
+        
+        Returns:
+            dict: {
+                'data': bytes terkompresi,
+                'original_size': int,
+                'compressed_size': int,
+                'algorithm': str ('LZW'/'HUFFMAN'/'ORIGINAL'),
+                'compression_ratio': float,
+                'space_saving': float,
+                'original_hash': str,
+                'filename': str,
+                'is_lossless': bool,
+                'lzw_result': dict,
+                'huffman_result': dict
+            }
         """
         if not data:
             return {
@@ -627,39 +443,10 @@ class AdaptiveCompressor:
                 'filename': filename,
                 'is_lossless': True,
                 'lzw_result': {'size': 0, 'lossless': True},
-                'huffman_result': {'size': 0, 'lossless': True},
-                'skipped': False,
-                'skip_reason': ''
+                'huffman_result': {'size': 0, 'lossless': True}
             }
 
         original_size = len(data)
-
-        # ==========================================================
-        # CEK APAKAH FILE SUDAH TERKOMPRESI
-        # ==========================================================
-        compress_check = should_compress(data, filename)
-        
-        if not compress_check['compress']:
-            self.stats['total_files'] += 1
-            self.stats['total_original_size'] += original_size
-            self.stats['total_compressed_size'] += original_size
-            self.stats['skipped_count'] += 1
-            
-            return {
-                'data': data,
-                'original_size': original_size,
-                'compressed_size': original_size,
-                'algorithm': 'ORIGINAL',
-                'compression_ratio': 100.0,
-                'space_saving': 0.0,
-                'original_hash': hashlib.sha256(data).hexdigest(),
-                'filename': filename,
-                'is_lossless': True,
-                'lzw_result': {'size': original_size, 'lossless': True},
-                'huffman_result': {'size': original_size, 'lossless': True},
-                'skipped': True,
-                'skip_reason': compress_check['message']
-            }
 
         # ==========================================================
         # 1. LZW Compression
@@ -736,9 +523,6 @@ class AdaptiveCompressor:
         compression_ratio = (best_size / original_size) * 100 if original_size > 0 else 0
         space_saving = (1 - best_size / original_size) * 100 if original_size > 0 else 0
 
-        # Hitung SASADA Score (efficiency rating)
-        sasada_score = self._calculate_sasada_score(original_size, best_size, best_algorithm)
-
         return {
             'data': best_data,
             'original_size': original_size,
@@ -756,47 +540,8 @@ class AdaptiveCompressor:
             'huffman_result': {
                 'size': huff_size,
                 'lossless': huff_lossless
-            },
-            'skipped': False,
-            'skip_reason': '',
-            'sasada_score': sasada_score
+            }
         }
-
-    def _calculate_sasada_score(self, original_size: int, compressed_size: int, algorithm: str) -> int:
-        """
-        Hitung SASADA Score (0-100) berdasarkan efisiensi kompresi.
-        """
-        if original_size == 0:
-            return 0
-        
-        saving = (1 - compressed_size / original_size) * 100
-        
-        # Base score berdasarkan space saving
-        if saving <= 0:
-            base_score = 0
-        elif saving < 10:
-            base_score = 20
-        elif saving < 25:
-            base_score = 40
-        elif saving < 50:
-            base_score = 60
-        elif saving < 75:
-            base_score = 80
-        else:
-            base_score = 95
-        
-        # Bonus untuk algoritma tertentu
-        algorithm_bonus = {
-            'LZW': 5 if saving > 20 else 0,
-            'HUFFMAN': 5 if saving > 20 else 0,
-            'ORIGINAL': 0
-        }.get(algorithm, 0)
-        
-        # Bonus untuk file yang sangat besar (>1MB)
-        size_bonus = 5 if original_size > 1024 * 1024 else 0
-        
-        score = min(100, base_score + algorithm_bonus + size_bonus)
-        return score
 
     def decompress(self, data: bytes, algorithm: str) -> bytes:
         """
@@ -825,10 +570,39 @@ class AdaptiveCompressor:
 
 
 # ============================================================
+# UTILITY FUNCTIONS
+# ============================================================
+def get_file_extension(filename: str) -> str:
+    """Dapatkan ekstensi file."""
+    return Path(filename).suffix.lower()
+
+
+def is_image_file(filename: str) -> bool:
+    """Cek apakah file adalah gambar."""
+    ext = get_file_extension(filename)
+    return ext in ['.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.tif', '.webp', '.gif']
+
+
+def is_text_file(filename: str) -> bool:
+    """Cek apakah file adalah teks."""
+    ext = get_file_extension(filename)
+    return ext in ['.txt', '.json', '.xml', '.csv', '.html', '.css', '.js', '.py', '.md']
+
+
+def get_file_size_str(size_bytes: int) -> str:
+    """Format ukuran file menjadi string yang mudah dibaca."""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size_bytes < 1024.0:
+            return f"{size_bytes:.2f} {unit}"
+        size_bytes /= 1024.0
+    return f"{size_bytes:.2f} TB"
+
+
+# ============================================================
 # SANITY CHECK (untuk testing)
 # ============================================================
 if __name__ == '__main__':
-    print(" Running sanity check...")
+    print("🧪 Running sanity check...")
     
     # Test data
     test_data = b"Hello World! This is a test for LZW and Huffman compression." * 100
@@ -838,7 +612,7 @@ if __name__ == '__main__':
     lzw_result = compress_lzw(test_data)
     lzw_decompressed = decompress_lzw(lzw_result['data'])
     assert lzw_decompressed == test_data, "LZW sanity check failed!"
-    print(f" LZW: {len(test_data)} -> {lzw_result['compressed_size']} bytes")
+    print(f"  ✅ LZW: {len(test_data)} -> {lzw_result['compressed_size']} bytes")
     
     # Test Huffman
     print("Testing Huffman...")
@@ -855,23 +629,5 @@ if __name__ == '__main__':
     print(f"     Original: {result['original_size']} bytes")
     print(f"     Compressed: {result['compressed_size']} bytes")
     print(f"     Space Saving: {result['space_saving']}%")
-    
-    # Test file detection
-    print("\nTesting file detection...")
-    
-    # Test dengan data PDF simulasi
-    pdf_data = b"%PDF-1.4\n%some pdf content" + test_data[:500]
-    check = should_compress(pdf_data, "test.pdf")
-    print(f"  PDF detection: compress={check['compress']}, reason={check['reason']}")
-    
-    # Test dengan data teks biasa
-    check = should_compress(test_data, "test.txt")
-    print(f"  Text detection: compress={check['compress']}, reason={check['reason']}")
-    
-    # Test dengan data acak (entropy tinggi)
-    import random
-    random_data = bytes([random.randint(0, 255) for _ in range(1000)])
-    check = should_compress(random_data, "random.bin")
-    print(f"  Random data: compress={check['compress']}, reason={check['reason']}")
     
     print("\n✅ All sanity checks passed!")
